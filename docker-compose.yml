@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  moex-monitor:
+    build: .
+    image: moex-ws-monitor:latest
+    container_name: moex-ws-monitor
+    restart: unless-stopped
+    environment:
+      - MOEX_DOMAIN=${MOEX_DOMAIN:-DEMO}
+      - MOEX_LOGIN=${MOEX_LOGIN:-guest}
+      - MOEX_PASSCODE=${MOEX_PASSCODE:-guest}
+    # Для интерактивного вывода
+    stdin_open: true
+    tty: true
+

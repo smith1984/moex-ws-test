@@ -21,6 +21,11 @@ except ImportError:
 
 load_dotenv()
 
+# Режимы диагностики и конфигурации через переменные окружения
+DEBUG_FRAMES = os.getenv('DEBUG_FRAMES', '0') == '1'
+SUB_SELECTOR_MODE = os.getenv('SUB_SELECTOR', 'TICKER').upper()  # TICKER | SECID | AUTO
+MOEX_WS_URL = os.getenv('MOEX_URL', 'wss://iss.moex.com/infocx/v3/websocket')
+
 # Цвета
 C = type('C', (), {
     'G': '\033[92m', 'R': '\033[91m', 'Y': '\033[93m', 'B': '\033[94m',
@@ -93,6 +98,7 @@ class GlobalMonitor:
         self.total_updates = 0
         self.start_time = datetime.now()
         self.lock = asyncio.Lock()
+        self._debug_msg_count_by_conn = defaultdict(int)
     
     async def update_ticker(self, conn_id, ticker, data):
         async with self.lock:
@@ -107,6 +113,20 @@ class GlobalMonitor:
     
     def set_conn_status(self, conn_id, status):
         self.conn_status[conn_id] = status
+
+    def get_summary(self):
+        uptime = (datetime.now() - self.start_time).seconds
+        with_prices = sum(1 for t in self.tickers.values() if t.last)
+        active_conns = sum(1 for s in self.conn_status.values() if s == 'online')
+        return {
+            'uptime': uptime,
+            'total_messages': self.total_updates,
+            'unique_tickers': len(self.tickers),
+            'with_prices': with_prices,
+            'rate': self.total_updates / uptime if uptime > 0 else 0.0,
+            'connections_active': active_conns,
+            'connections_total': len(self.conn_status) or 0,
+        }
     
     def display_live(self):
         """Обновляемый вывод в консоль"""
@@ -151,6 +171,8 @@ class GlobalMonitor:
         
         if len(sorted_tickers) > display_count:
             print(f"\n{C.Y}... и еще {len(sorted_tickers) - display_count} тикеров{C.END}")
+        elif not sorted_tickers:
+            print(f"{C.Y}(Нет данных. Возможные причины: закрыта сессия, нет прав, неверный selector){C.END}")
         
         # Статистика по соединениям (компактно)
         print(f"\n{C.BOLD}Connections Status:{C.END}")
@@ -172,6 +194,9 @@ async def display_loop(monitor, stop):
     while not stop.is_set():
         monitor.display_live()
         await asyncio.sleep(1)  # Обновление каждую секунду
+        # Автодиагностика: если долго нет апдейтов при онлайн-соединениях — подсказка
+        if monitor.total_updates == 0 and any(s == 'online' for s in monitor.conn_status.values()):
+            print(f"{C.Y}Подсказка: если данные не идут, проверьте переменные MOEX_DOMAIN/LOGIN/PASSCODE и SUB_SELECTOR{C.END}")
 
 
 async def send_frame(ws, cmd, headers):
@@ -184,7 +209,7 @@ async def recv_frame(ws):
 
 async def websocket_client(conn_id, tickers, monitor, stop):
     """WebSocket клиент для одного соединения"""
-    url = 'wss://iss.moex.com/infocx/v3/websocket'
+    url = MOEX_WS_URL
     domain = os.getenv('MOEX_DOMAIN', 'DEMO')
     login = os.getenv('MOEX_LOGIN', 'guest')
     passcode = os.getenv('MOEX_PASSCODE', 'guest')
@@ -211,12 +236,21 @@ async def websocket_client(conn_id, tickers, monitor, stop):
                 
                 # SUBSCRIBE
                 for ticker in tickers:
-                    await send_frame(ws, 'SUBSCRIBE', {
-                        'id': f'{conn_id}-{ticker}',
-                        'destination': 'MXSE.orderbooks',
-                        'selector': f'TICKER="MXSE.TQBR.{ticker}"'
-                    })
-                    await asyncio.sleep(0.02)
+                    if SUB_SELECTOR_MODE in ('TICKER', 'AUTO'):
+                        await send_frame(ws, 'SUBSCRIBE', {
+                            'id': f'{conn_id}-{ticker}-tk',
+                            'destination': 'MXSE.orderbooks',
+                            'selector': f"TICKER='MXSE.TQBR.{ticker}'"
+                        })
+                        await asyncio.sleep(0.01)
+
+                    if SUB_SELECTOR_MODE in ('SECID', 'AUTO'):
+                        await send_frame(ws, 'SUBSCRIBE', {
+                            'id': f'{conn_id}-{ticker}-sc',
+                            'destination': 'MXSE.orderbooks',
+                            'selector': f"SECID='{ticker}'"
+                        })
+                        await asyncio.sleep(0.01)
                 
                 monitor.set_conn_status(conn_id, 'online')
                 reconnect_delay = 5
@@ -227,14 +261,25 @@ async def websocket_client(conn_id, tickers, monitor, stop):
                         frame = await asyncio.wait_for(recv_frame(ws), timeout=60.0)
                         
                         if frame.cmd == 'MESSAGE':
-                            body = json.loads(frame.body.strip('\0') if isinstance(frame.body, str) else frame.body.decode('utf8').strip('\0'))
+                            raw_body = frame.body.strip('\0') if isinstance(frame.body, str) else frame.body.decode('utf8').strip('\0')
+                            if DEBUG_FRAMES and monitor._debug_msg_count_by_conn[conn_id] < 3:
+                                monitor._debug_msg_count_by_conn[conn_id] += 1
+                                print(f"\n{C.Y}[DEBUG][conn {conn_id}] MESSAGE headers={frame.headers} body_sample={raw_body[:120]}...{C.END}")
+
+                            body = json.loads(raw_body)
                             ticker_full = body.get('TICKER', '')
                             ticker = ticker_full.split('.')[-1] if ticker_full else None
+                            
+                            # Альтернативное поле тикера
+                            if not ticker:
+                                ticker = body.get('SECID')
                             
                             if ticker:
                                 await monitor.update_ticker(conn_id, ticker, body)
                         
                         elif frame.cmd == 'ERROR':
+                            if DEBUG_FRAMES:
+                                print(f"{C.R}[DEBUG][conn {conn_id}] ERROR headers={frame.headers}{C.END}")
                             monitor.set_conn_status(conn_id, 'error')
                             break
                     

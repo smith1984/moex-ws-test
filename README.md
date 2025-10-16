@@ -101,6 +101,9 @@ Press Ctrl+C to stop
 MOEX_DOMAIN=DEMO
 MOEX_LOGIN=guest
 MOEX_PASSCODE=guest
+SUB_SELECTOR=AUTO   # TICKER | SECID | AUTO
+DEBUG_FRAMES=0      # 1 чтобы увидеть первые сообщения
+MOEX_URL=wss://iss.moex.com/infocx/v3/websocket
 ```
 
 **DEMO креденшелы** дают полный доступ к WebSocket API MOEX!
@@ -215,7 +218,9 @@ TICKERS_PER_CONNECTION = 43
 - **WebSocket URL**: `wss://iss.moex.com/infocx/v3/websocket`
 - **Протокол**: STOMP
 - **Destination**: `MXSE.orderbooks`
-- **Selector**: `TICKER="MXSE.TQBR.{ticker}"`
+- **Selector**:
+  - `TICKER="MXSE.TQBR.{ticker}"`
+  - или `SECID="{ticker}"` (включается при `SUB_SELECTOR=SECID` или `AUTO`)
 - **Ping интервал**: 20 секунд
 - **Обновление дисплея**: 1 раз в секунду
 

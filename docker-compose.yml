@@ -10,6 +10,10 @@ services:
       - MOEX_DOMAIN=${MOEX_DOMAIN:-DEMO}
       - MOEX_LOGIN=${MOEX_LOGIN:-guest}
       - MOEX_PASSCODE=${MOEX_PASSCODE:-guest}
+      # Диагностика/конфигурация
+      - SUB_SELECTOR=${SUB_SELECTOR:-AUTO}   # TICKER | SECID | AUTO
+      - DEBUG_FRAMES=${DEBUG_FRAMES:-0}      # 1 для вывода первых сообщений
+      - MOEX_URL=${MOEX_URL:-wss://iss.moex.com/infocx/v3/websocket}
     # Для интерактивного вывода
     stdin_open: true
     tty: true

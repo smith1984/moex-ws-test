@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-MOEX 30 WebSocket Monitor - 1500 Tickers Real-time
+MOEX 30 WebSocket Monitor - 1500 Tickers Real-time (Candles)
 30 соединений × 50 тикеров = 1500 тикеров с обновляемым выводом в консоль
+Источник данных: MXSE.candles (свечи)
 """
 import asyncio
 import json
@@ -30,61 +31,64 @@ C = type('C', (), {
 
 
 class TickerData:
-    """Данные одного тикера"""
+    """Данные одного тикера (из candles)"""
     def __init__(self, ticker):
         self.ticker = ticker
-        self.bid = None
-        self.offer = None
-        self.last = None
+        self.open = None
+        self.high = None
+        self.low = None
+        self.close = None
         self.volume = None
+        self.value = None
+        self.candle_time = None
         self.updates = 0
         self.last_update = None
     
     def update(self, data):
-        """Обновляет данные из orderbook"""
-        # Данные приходят в формате orderbook с columns и data
+        """Обновляет данные из candles"""
+        # Данные приходят в формате candles с columns и data
+        # Columns: ['FROM', 'TILL', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VALUE', 'VOLUME']
         if 'data' in data and 'columns' in data:
             columns = data['columns']
             rows = data['data']
             
-            # Извлекаем лучшие цены из книги заявок
-            buy_orders = []  # Заявки на покупку
-            sell_orders = []  # Заявки на продажу
-            
-            for row in rows:
-                if len(row) >= 2:
-                    buysell = row[0]  # 'B' или 'S'
-                    price_data = row[1]  # [цена, точность]
-                    
-                    if isinstance(price_data, list) and len(price_data) >= 1:
-                        price = price_data[0]
-                        
-                        if buysell == 'B':
-                            buy_orders.append(price)
-                        elif buysell == 'S':
-                            sell_orders.append(price)
-            
-            # BID = максимальная цена покупки
-            if buy_orders:
-                self.bid = max(buy_orders)
-            
-            # OFFER = минимальная цена продажи
-            if sell_orders:
-                self.offer = min(sell_orders)
-            
-            # LAST можно вычислить как среднее между bid и offer
-            if self.bid and self.offer:
-                self.last = (self.bid + self.offer) / 2
+            # Берем последнюю свечу (самую актуальную)
+            if rows:
+                last_candle = rows[-1]
+                
+                # Создаем индексы для колонок
+                col_idx = {col: idx for idx, col in enumerate(columns)}
+                
+                # Извлекаем данные
+                if 'FROM' in col_idx:
+                    self.candle_time = last_candle[col_idx['FROM']]
+                
+                def extract_value(row, col_name):
+                    """Извлекает значение из формата [значение, точность]"""
+                    if col_name in col_idx:
+                        val = row[col_idx[col_name]]
+                        if isinstance(val, list) and len(val) >= 1:
+                            return val[0]
+                        return val
+                    return None
+                
+                self.open = extract_value(last_candle, 'OPEN')
+                self.high = extract_value(last_candle, 'HIGH')
+                self.low = extract_value(last_candle, 'LOW')
+                self.close = extract_value(last_candle, 'CLOSE')
+                self.value = extract_value(last_candle, 'VALUE')
+                self.volume = extract_value(last_candle, 'VOLUME')
         
         self.updates += 1
         self.last_update = datetime.now()
     
     def format_line(self):
         """Форматирует строку для вывода"""
-        bid_str = f"{self.bid:>8.2f}" if self.bid else "     N/A"
-        offer_str = f"{self.offer:>8.2f}" if self.offer else "     N/A"
-        last_str = f"{self.last:>8.2f}" if self.last else "     N/A"
-        vol_str = f"{self.volume:>12,}" if self.volume else "         N/A"
+        open_str = f"{self.open:>8.2f}" if self.open else "     N/A"
+        high_str = f"{self.high:>8.2f}" if self.high else "     N/A"
+        low_str = f"{self.low:>8.2f}" if self.low else "     N/A"
+        close_str = f"{self.close:>8.2f}" if self.close else "     N/A"
+        vol_str = f"{self.volume:>10,}" if self.volume else "       N/A"
         
         # Время последнего обновления
         if self.last_update:
@@ -101,18 +105,21 @@ class TickerData:
             time_str = "  N/A   "
             time_color = C.END
         
-        # Цвет для изменения
-        change_color = C.END
-        if self.bid and self.offer:
-            if self.bid > self.offer * 0.99:
-                change_color = C.G
+        # Цвет для close в зависимости от изменения
+        close_color = C.END
+        if self.open and self.close:
+            if self.close > self.open:
+                close_color = C.G  # Зеленый - рост
+            elif self.close < self.open:
+                close_color = C.R  # Красный - падение
         
         return (f"{self.ticker:6s} | "
-                f"{C.G}{bid_str}{C.END} | "
-                f"{C.R}{offer_str}{C.END} | "
-                f"{C.C}{last_str}{C.END} | "
+                f"{C.C}{open_str}{C.END} | "
+                f"{C.Y}{high_str}{C.END} | "
+                f"{C.M}{low_str}{C.END} | "
+                f"{close_color}{close_str}{C.END} | "
                 f"{vol_str} | "
-                f"{change_color}{self.updates:4d}{C.END} | "
+                f"{self.updates:4d} | "
                 f"{time_color}{time_str}{C.END}")
 
 
@@ -168,7 +175,7 @@ class GlobalMonitor:
         # Статусная строка
         active_conns = sum(1 for s in self.conn_status.values() if s == 'online')
         with_data = len(self.tickers)
-        with_prices = sum(1 for t in self.tickers.values() if t.last)
+        with_prices = sum(1 for t in self.tickers.values() if t.close)
         
         print(f"{C.G}Connections: {active_conns}/30{C.END} | "
               f"{C.C}Updates: {self.total_updates}{C.END} | "
@@ -177,8 +184,8 @@ class GlobalMonitor:
               f"{C.B}Rate: {rate:.1f} msg/s{C.END} | "
               f"Uptime: {uptime}s")
         
-        print(f"\n{C.BOLD}{'Ticker':<6} | {'BID':>8} | {'ASK':>8} | {'LAST':>8} | {'Volume':>12} | {'Upd':>4} | {'Last Update':>8}{C.END}")
-        print('-' * 110)
+        print(f"\n{C.BOLD}{'Ticker':<6} | {'OPEN':>8} | {'HIGH':>8} | {'LOW':>8} | {'CLOSE':>8} | {'Volume':>10} | {'Upd':>4} | {'Last Update':>8}{C.END}")
+        print('-' * 115)
         
         # Сортируем тикеры по активности
         sorted_tickers = sorted(
@@ -257,7 +264,7 @@ async def websocket_client(conn_id, tickers, monitor, stop):
                 for ticker in tickers:
                     await send_frame(ws, 'SUBSCRIBE', {
                         'id': f'{conn_id}-{ticker}',
-                        'destination': 'MXSE.orderbooks',
+                        'destination': 'MXSE.candles',
                         'selector': f'TICKER="MXSE.TQBR.{ticker}"'
                     })
                     await asyncio.sleep(0.02)

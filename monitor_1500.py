@@ -41,10 +41,41 @@ class TickerData:
         self.last_update = None
     
     def update(self, data):
-        self.bid = data.get('BID')
-        self.offer = data.get('OFFER')
-        self.last = data.get('LAST')
-        self.volume = data.get('VOLTODAY')
+        """Обновляет данные из orderbook"""
+        # Данные приходят в формате orderbook с columns и data
+        if 'data' in data and 'columns' in data:
+            columns = data['columns']
+            rows = data['data']
+            
+            # Извлекаем лучшие цены из книги заявок
+            buy_orders = []  # Заявки на покупку
+            sell_orders = []  # Заявки на продажу
+            
+            for row in rows:
+                if len(row) >= 2:
+                    buysell = row[0]  # 'B' или 'S'
+                    price_data = row[1]  # [цена, точность]
+                    
+                    if isinstance(price_data, list) and len(price_data) >= 1:
+                        price = price_data[0]
+                        
+                        if buysell == 'B':
+                            buy_orders.append(price)
+                        elif buysell == 'S':
+                            sell_orders.append(price)
+            
+            # BID = максимальная цена покупки
+            if buy_orders:
+                self.bid = max(buy_orders)
+            
+            # OFFER = минимальная цена продажи
+            if sell_orders:
+                self.offer = min(sell_orders)
+            
+            # LAST можно вычислить как среднее между bid и offer
+            if self.bid and self.offer:
+                self.last = (self.bid + self.offer) / 2
+        
         self.updates += 1
         self.last_update = datetime.now()
     
@@ -107,6 +138,19 @@ class GlobalMonitor:
     
     def set_conn_status(self, conn_id, status):
         self.conn_status[conn_id] = status
+    
+    def get_summary(self):
+        """Возвращает итоговую статистику"""
+        uptime = (datetime.now() - self.start_time).seconds
+        return {
+            'uptime': uptime,
+            'total_messages': self.total_updates,
+            'unique_tickers': len(self.tickers),
+            'with_prices': sum(1 for t in self.tickers.values() if t.last),
+            'rate': self.total_updates / uptime if uptime > 0 else 0,
+            'connections_active': sum(1 for s in self.conn_status.values() if s == 'online'),
+            'connections_total': len(self.conn_status)
+        }
     
     def display_live(self):
         """Обновляемый вывод в консоль"""
@@ -228,10 +272,13 @@ async def websocket_client(conn_id, tickers, monitor, stop):
                         
                         if frame.cmd == 'MESSAGE':
                             body = json.loads(frame.body.strip('\0') if isinstance(frame.body, str) else frame.body.decode('utf8').strip('\0'))
-                            ticker_full = body.get('TICKER', '')
-                            ticker = ticker_full.split('.')[-1] if ticker_full else None
                             
-                            if ticker:
+                            # Тикер берем из headers подписки
+                            # Извлекаем тикер из subscription id
+                            subscription_id = frame.headers.get('subscription', '')
+                            if '-' in subscription_id:
+                                # Формат: '{conn_id}-{ticker}'
+                                ticker = subscription_id.split('-', 1)[1]
                                 await monitor.update_ticker(conn_id, ticker, body)
                         
                         elif frame.cmd == 'ERROR':
